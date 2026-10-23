@@ -1,5 +1,13 @@
 import { type MiGPTConfig } from 'mi-gpt'
-import { type TTSConfig } from 'mi-gpt-tts'
+import { type TTSConfig as LegacyTTSConfig } from 'mi-gpt-tts'
+
+export type TTSConfig = Omit<LegacyTTSConfig, 'volcano'> & {
+  volcano?: {
+    apiKey: string
+    resourceId: 'seed-icl-2.0' | 'seed-tts-2.0'
+    model: 'seed-tts-2.0-standard' | 'seed-tts-2.0-expressive'
+  }
+}
 
 export type SpeakerConfig = Omit<
   MiGPTConfig['speaker'],

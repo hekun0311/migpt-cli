@@ -10,7 +10,7 @@ import {
 import { produce } from 'immer'
 import { MultiInput } from './components/MultiInput.js'
 import { useState } from 'react'
-import { type TTSConfig } from 'mi-gpt-tts'
+import { type TTSConfig } from './type.js'
 import { TTSVolcano } from './components/TTSVolcano.js'
 import { isLocalhost } from './utils.js'
 
@@ -19,7 +19,7 @@ import { isLocalhost } from './utils.js'
 // 如果我就是想要用 edge 来朗读，那么就需要提供 edge 的默认音色
 const defaultSpeakerMap: Record<string, string | undefined> = {
   edge: '云希',
-  volcano: '灿灿',
+  volcano: '',
   openai: 'Alloy',
 }
 
@@ -70,7 +70,7 @@ export function Tts(props: {
                 }
                 draft.gui.ttsProvider = value === 'xiaoai' ? undefined : value
                 const defaultSpeaker = defaultSpeakerMap[value]
-                if (defaultSpeaker) {
+                if (defaultSpeaker !== undefined) {
                   if (!draft.tts) {
                     draft.tts = {}
                   }

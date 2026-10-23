@@ -1,5 +1,5 @@
 import { GuiConfig } from '@migptgui/options'
-import type { TTSConfig } from 'mi-gpt-tts'
+import type { TTSConfig } from '@migptgui/options'
 
 export async function getStatus() {
   const response = await fetch('/api/status')
@@ -26,18 +26,25 @@ export async function testPublicURL(
 }
 
 export async function testTts(ttsConfig: TTSConfig) {
-  const audioUrl =
-    '/api/test/audio?ttsConfig=' + encodeURIComponent(JSON.stringify(ttsConfig))
-  const audio = new Audio(audioUrl)
-  return new Promise<void>((resolve, reject) => {
-    audio.addEventListener('error', () => {
-      reject()
-    })
-    audio.addEventListener('canplay', () => {
-      resolve()
-      audio.play()
-    })
+  const response = await fetch('/api/test/audio', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(ttsConfig),
   })
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+  const audioUrl = URL.createObjectURL(await response.blob())
+  const audio = new Audio(audioUrl)
+  try {
+    await audio.play()
+    audio.addEventListener('ended', () => URL.revokeObjectURL(audioUrl), {
+      once: true,
+    })
+  } catch (error) {
+    URL.revokeObjectURL(audioUrl)
+    throw error
+  }
 }
 
 export async function run(config: unknown) {

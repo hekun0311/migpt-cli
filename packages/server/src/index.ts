@@ -5,7 +5,8 @@ import os from 'node:os'
 import { getStatus, type RunConfig, run, stop } from '@migptgui/controller'
 import fse from 'fs-extra'
 import fs from 'node:fs/promises'
-import { createTTS, kTTSSpeakers } from 'mi-gpt-tts'
+import { kTTSSpeakers } from 'mi-gpt-tts'
+import { createTTS } from './tts.js'
 import { Readable } from 'node:stream'
 // import ip from 'ip'
 import { type GuiConfig } from '@migptgui/options'
@@ -78,7 +79,10 @@ export function runServer(options?: {
       return
     }
 
-    const tts = createTTS(guiConfigRunning.tts)
+    const tts = createTTS(
+      guiConfigRunning.tts,
+      guiConfigRunning.gui?.ttsProvider,
+    )
 
     const nUrl = req.url.replace('+text=', '&text=') // 修正请求 URL
     const url = new URL('http://localhost' + nUrl)
@@ -102,6 +106,7 @@ export function runServer(options?: {
           audioStream.destroy(new Error('没有把配置填写完整'))
         }
       })
+      .catch((error: Error) => audioStream.destroy(error))
 
     let headersSent = false
 
@@ -186,11 +191,10 @@ export function runServer(options?: {
     }
   })
 
-  app.get('/api/test/audio', (req, res) => {
-    dRoute('进入 GET /api/test/audio，query 参数：%O', req.query)
+  app.post('/api/test/audio', (req, res) => {
+    dRoute('进入 POST /api/test/audio')
 
-    const params = req.query as { ttsConfig: string }
-    const options = JSON.parse(params.ttsConfig)
+    const options = req.body
     const testTTS = createTTS(options)
 
     const audioStream = new Readable({ read() {} })
@@ -220,6 +224,7 @@ export function runServer(options?: {
           audioStream.destroy(new Error('没有把配置填写完整'))
         }
       })
+      .catch((error: Error) => audioStream.destroy(error))
 
     let headersSent = false
 
