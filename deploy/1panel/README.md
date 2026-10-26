@@ -18,11 +18,23 @@ sh deploy/1panel/install.sh
 
 1. 读取实际容器配置，检查能否准确迁移；安全路径列表与服务器 Docker 自身默认值核对（临时创建探测容器，不启动、不挂载旧数据，读取后删除）；不支持的非默认配置会报错停止。
 2. 使用当前源码构建镜像，此时旧服务仍运行。
-3. 停止旧容器并备份 `/root/.migptgui`；保留原挂载、端口、环境变量、启动参数、网络和登录设置。
+3. 停止旧容器并备份 `/root/.migptgui` 和 `/app/node_modules/mi-gpt/prisma`；数据库完整性及机器人索引校验通过后，首次迁移时将数据库保存到独立持久目录并挂载，保留原挂载、端口、环境变量、启动参数、网络和登录设置。
 4. 将旧容器改名保留并关闭其自动重启策略，避免服务器重启后争抢端口；以 Compose 服务 `migpt` 启动新容器。
 5. 检查面板 `/ping` 端点；成功后按项目 ID 注册 MiGPT。重复安装不会重复注册或创建容器。
 
 服务器专用部署配置保存在 `/opt/migpt-volcano-v3/runtime/compose.json`，凭证只保存在服务器，文件权限为 `600`、目录为 `700`；不要上传或公开此文件。主 Compose 文件使用 `include` 引用它，统一菜单无需读取额外环境文件即可显示状态。
+
+机器人数据库必须与 `.bot.json` 一起保留。数据库所在的 Prisma 目录单独持久挂载到 `/app/node_modules/mi-gpt/prisma`，首次持久化目录位于 `/opt/migpt-volcano-v3/databases/时间-版本/`。目前本项目固定沿用 mi-gpt 4.2 的数据库格式；升级 mi-gpt 依赖及数据库结构不属于此更新工具的职责。
+
+## 已迁移后出现 find bot failed 的恢复
+
+如果之前只挂载了 `/root/.migptgui`，重建后旧 `.bot.json` 可能指向已丢失的数据库。不要删除索引或重置。先通过 `docker ps -a --filter name=migpt-volcano-v3` 找到保留且停止的旧容器，拉取修复后执行：
+
+```sh
+python3 deploy/1panel/deploy.py recover-db /opt/migpt-volcano-v3/source main 旧容器完整名称
+```
+
+恢复过程不构建镜像：先停止当前容器，备份当前配置和数据库，再从明确指定的旧容器复制 Prisma 目录。它只在副本上恢复 SQLite 日志并检查完整性及机器人/主人 ID，校验通过后才挂载新的持久目录。不会删除 `.bot.json`，不会覆盖已有数据库目录。原数据库及日志文件仍保留在备份和旧容器中。若新容器健康检查失败，回到恢复前的部署配置。
 
 ## 日常更新
 

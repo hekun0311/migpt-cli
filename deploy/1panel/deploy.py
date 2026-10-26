@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -18,6 +20,7 @@ RUNTIME = ROOT / 'runtime/compose.json'
 REGISTRY = Path('/etc/yklx-update/projects.conf')
 CONTAINER = 'migpt-volcano-v3'
 PROJECT = 'migpt-volcano-v3'
+DATABASE_TARGET = '/app/node_modules/mi-gpt/prisma'
 ENTRY = 'migpt|MiGPT|/opt/migpt-volcano-v3/source|main|deploy/1panel/update.sh|deploy/1panel/compose.yaml|migpt'
 
 
@@ -37,6 +40,54 @@ def run(args, capture=False):
 
 def inspect_container():
     return json.loads(run(['docker', 'inspect', CONTAINER], capture=True))[0]
+
+
+def persistent_database(old):
+    return any(mount['Destination'] == DATABASE_TARGET for mount in old.get('Mounts') or [])
+
+
+def attach_database(model, directory):
+    service = model['services']['migpt']
+    service['volumes'] = [mount for mount in service['volumes'] if mount['target'] != DATABASE_TARGET]
+    service['volumes'].append({
+        'type': 'bind', 'source': str(directory), 'target': DATABASE_TARGET,
+        'bind': {'create_host_path': False},
+    })
+
+
+def restore_database(snapshot, target, index_path):
+    """在副本上恢复 SQLite 日志并检查索引，不修改原容器或现有数据库。"""
+    if target.exists():
+        raise DeployError('恢复目录已经存在，拒绝覆盖数据库。')
+    if not (snapshot / 'app.db').is_file() or not index_path.is_file():
+        raise DeployError('数据库或 .bot.json 缺失，停止恢复；现有数据未覆盖。')
+    index = json.loads(index_path.read_text(encoding='utf-8'))
+    if not index.get('botId') or not index.get('masterId'):
+        raise DeployError('.bot.json 中没有完整机器人索引，停止恢复。')
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shutil.copytree(snapshot, target)
+    os.chmod(target, 0o700)
+    connection = sqlite3.connect(str(target / 'app.db'))
+    try:
+        if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+            raise DeployError('旧数据库完整性检查未通过，停止恢复。')
+        for key in ('botId', 'masterId'):
+            if not connection.execute('SELECT 1 FROM "User" WHERE id = ?', (index[key],)).fetchone():
+                raise DeployError('旧数据库与当前 .bot.json 不匹配，停止恢复；不删除索引。')
+        # SQLite backup API 将 WAL/热日志恢复后的完整数据写入新文件。
+        verified = sqlite3.connect(str(target / 'verified.db'))
+        try:
+            connection.backup(verified)
+        finally:
+            verified.close()
+    finally:
+        connection.close()
+    os.replace(target / 'verified.db', target / 'app.db')
+    os.chmod(target / 'app.db', 0o600)
+    for suffix in ('-wal', '-shm', '-journal'):
+        sidecar = target / ('app.db' + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
 
 
 def write_private(path, data):
@@ -328,7 +379,7 @@ def reconnect_old(backup_name, endpoints):
         run([*args, name, backup_name], capture=True)
 
 
-def deploy(action, source):
+def deploy(action, source, recovery_container=None):
     if sys.version_info < (3, 9):
         raise DeployError('需要 Python 3.9 或更新版本。')
     if not hasattr(os, 'geteuid') or os.geteuid() != 0:
@@ -355,18 +406,24 @@ def deploy(action, source):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise DeployError('另一项 MiGPT 更新正在执行。') from None
-        deploy_locked(action, source)
+        deploy_locked(action, source, recovery_container)
 
 
-def deploy_locked(action, source):
+def deploy_locked(action, source, recovery_container=None):
     old = inspect_container()
     if not old['State'].get('Running'):
         raise DeployError('当前 MiGPT 容器未运行；请先恢复旧服务再迁移或更新。')
     labels = old['Config'].get('Labels') or {}
+    if recovery_container is not None:
+        if not re.fullmatch(r'migpt-volcano-v3-backup-\d{8}T\d{6}Z', recovery_container):
+            raise DeployError('恢复来源必须是本更新器保留的旧容器名称。')
+        recovery = json.loads(run(['docker', 'inspect', recovery_container], capture=True))[0]
+        if recovery['State'].get('Running'):
+            raise DeployError('恢复来源容器仍在运行，请先停止它。')
     if RUNTIME.exists():
         if labels.get('com.docker.compose.project') != PROJECT or labels.get('com.docker.compose.service') != 'migpt':
             raise DeployError('已有部署记录与当前容器归属不一致，停止部署。')
-        if action == 'install':
+        if action == 'install' and persistent_database(old):
             check_ready()
             register_project()
             print('MiGPT 已迁移，已核对菜单注册；没有重复创建容器。')
@@ -375,7 +432,7 @@ def deploy_locked(action, source):
         raise DeployError('请先迁移独立容器，不能接管其他 Compose 项目。')
 
     revision = run(['git', '-C', str(source), 'rev-parse', '--short=12', 'HEAD'], capture=True).strip()
-    image = f'migpt-volcano-v3:git-{revision}'
+    image = old['Image'] if recovery_container else f'migpt-volcano-v3:git-{revision}'
     candidate = make_compose(old, image, source, security_defaults(old['Image']))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup = ROOT / 'backups' / f'{stamp}-{revision}'
@@ -385,11 +442,18 @@ def deploy_locked(action, source):
     previous = RUNTIME.read_text(encoding='utf-8') if RUNTIME.exists() else None
     if previous is not None:
         write_private(backup / 'previous-compose.json', previous)
+    database_dir = None
+    if recovery_container or not persistent_database(old):
+        database_dir = ROOT / 'databases' / f'{stamp}-{revision}'
+        attach_database(candidate, database_dir)
     candidate_path = backup / 'candidate-compose.json'
     write_json(candidate_path, candidate)
     compose(candidate_path, 'config', '--quiet')
-    print(f'正在构建版本 {revision}，旧服务保持运行……', flush=True)
-    run(['docker', 'build', '-f', str(source / 'Dockerfile.volcano-v3'), '-t', image, str(source)])
+    if not recovery_container:
+        print(f'正在构建版本 {revision}，旧服务保持运行……', flush=True)
+        run(['docker', 'build', '-f', str(source / 'Dockerfile.volcano-v3'), '-t', image, str(source)])
+    else:
+        print('正在恢复旧容器数据库，使用当前镜像，不重新构建……', flush=True)
     # 固定旧镜像 ID，回退时不依赖可变 tag。
     rollback = json.loads(previous) if previous else None
     if rollback:
@@ -403,6 +467,17 @@ def deploy_locked(action, source):
         run(['docker', 'stop', '--time', '30', CONTAINER], capture=True)
         stopped = True
         run(['docker', 'cp', f'{CONTAINER}:/root/.migptgui', str(backup / 'data')], capture=True)
+        run(['docker', 'cp', f'{CONTAINER}:{DATABASE_TARGET}', str(backup / 'current-prisma')], capture=True)
+        if recovery_container:
+            run(['docker', 'cp', f'{recovery_container}:{DATABASE_TARGET}', str(backup / 'recovery-prisma')], capture=True)
+            database_snapshot = backup / 'recovery-prisma'
+        else:
+            database_snapshot = backup / 'current-prisma'
+        if database_dir is not None:
+            restore_database(database_snapshot, database_dir, backup / 'data/default/.bot.json')
+            # 首次补上持久化的普通更新若回退，也必须带回原数据库。
+            if rollback is not None and not recovery_container:
+                attach_database(rollback, database_dir)
         if previous is None:
             run(['docker', 'rename', CONTAINER, backup_name], capture=True)
             renamed = True
@@ -438,9 +513,15 @@ def deploy_locked(action, source):
                     if not inspect_container()['State'].get('Running'):
                         raise DeployError('旧容器未能恢复运行。')
             elif stopped:
-                write_json(RUNTIME, rollback)
-                compose(source / 'deploy/1panel/compose.yaml', 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '100', 'migpt')
-                check_ready()
+                if switched:
+                    write_json(RUNTIME, rollback)
+                    compose(source / 'deploy/1panel/compose.yaml', 'up', '-d', '--no-build', '--pull', 'never', '--wait', '--wait-timeout', '100', 'migpt')
+                    check_ready()
+                else:
+                    # 还没替换容器时直接恢复原实例，不能重建并丢掉其写入层数据库。
+                    run(['docker', 'start', CONTAINER], capture=True)
+                    if not inspect_container()['State'].get('Running'):
+                        raise DeployError('旧容器未能恢复运行。')
             write_private(REGISTRY, (backup / 'projects.conf').read_text(encoding='utf-8'))
         except Exception:
             raise DeployError(f'自动恢复未完成，请保留现场；部署配置与数据备份位于 {backup}。') from None
@@ -448,6 +529,8 @@ def deploy_locked(action, source):
 
     print(f'MiGPT 版本 {revision} 已部署，面板健康检查通过。')
     print(f'数据及部署配置备份：{backup}')
+    if database_dir:
+        print(f'数据库已校验并持久保存：{database_dir}')
     if renamed:
         print(f'旧容器已保留（停止状态）：{backup_name}')
     print(compose(source / 'deploy/1panel/compose.yaml', 'ps', '--services', '--status', 'running').strip())
@@ -457,9 +540,11 @@ def deploy_locked(action, source):
 
 if __name__ == '__main__':
     try:
-        if len(sys.argv) != 4 or sys.argv[1] not in ('install', 'update') or sys.argv[3] != 'main':
-            raise DeployError('用法：deploy.py install|update /opt/migpt-volcano-v3/source main')
-        deploy(sys.argv[1], Path(sys.argv[2]))
+        if len(sys.argv) not in (4, 5) or sys.argv[1] not in ('install', 'update', 'recover-db') or sys.argv[3] != 'main':
+            raise DeployError('用法：deploy.py install|update|recover-db /opt/migpt-volcano-v3/source main [旧容器名]')
+        if (sys.argv[1] == 'recover-db') != (len(sys.argv) == 5):
+            raise DeployError('recover-db 必须明确指定旧容器名称。')
+        deploy(sys.argv[1], Path(sys.argv[2]), sys.argv[4] if len(sys.argv) == 5 else None)
     except KeyboardInterrupt:
         print('操作被中断，请检查容器状态和最近备份。', file=sys.stderr)
         sys.exit(130)

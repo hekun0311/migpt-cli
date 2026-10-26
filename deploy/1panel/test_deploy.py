@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import io
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -104,7 +105,7 @@ class DeploymentTests(unittest.TestCase):
             deploy.register_project(registry)
             self.assertEqual(registry.read_text(encoding='utf-8'), original + deploy.ENTRY + '\n')
 
-    def scenario(self, previous=False, failure=None):
+    def scenario(self, previous=False, failure=None, recovery=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -122,6 +123,8 @@ class DeploymentTests(unittest.TestCase):
             operations.append(args)
             if args[0] == 'git':
                 return 'abc123\n'
+            if args[:2] == ['docker', 'inspect']:
+                return json.dumps([{'State': {'Running': False}}])
             if args[1] == 'build' and failure == 'build':
                 raise deploy.DeployError('build failed')
             if args[1] == 'stop':
@@ -149,12 +152,15 @@ class DeploymentTests(unittest.TestCase):
                 patch.object(deploy, 'run', side_effect=fake_run), \
                 patch.object(deploy, 'compose', side_effect=fake_compose), \
                 patch.object(deploy, 'check_ready', side_effect=ready), \
+                patch.object(deploy, 'restore_database') as restore, \
                 patch.object(deploy, 'safe_logs'), redirect_stdout(io.StringIO()):
             if failure:
                 with self.assertRaises(deploy.DeployError):
                     deploy.deploy_locked('update' if previous else 'install', root / 'source')
             else:
-                deploy.deploy_locked('update' if previous else 'install', root / 'source')
+                deploy.deploy_locked('recover-db' if recovery else ('update' if previous else 'install'), root / 'source',
+                                     'migpt-volcano-v3-backup-20261026T151423Z' if recovery else None)
+                self.assertTrue(restore.called)
         return operations, state, runtime, registry
 
     def test_build_failure_does_not_stop_container(self):
@@ -193,6 +199,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse(any(item[:2] == ['docker', 'rename'] for item in operations))
         self.assertFalse(any(item[0] == 'compose' and item[2] == 'up' for item in operations))
 
+    def test_compose_backup_failure_restarts_original_instance_without_recreate(self):
+        operations, state, _, _ = self.scenario(previous=True, failure='backup')
+        self.assertTrue(state['running'])
+        self.assertTrue(any(item[:2] == ['docker', 'start'] for item in operations))
+        self.assertFalse(any(item[0] == 'compose' and item[2] == 'up' for item in operations))
+
     def test_repeat_install_only_registers_existing_deployment(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -201,6 +213,7 @@ class DeploymentTests(unittest.TestCase):
             registry = root / 'projects.conf'
             registry.write_text('minio|existing\n')
             old = container()
+            old['Mounts'].append({'Type': 'bind', 'Source': '/persistent-db', 'Destination': deploy.DATABASE_TARGET, 'RW': True, 'Mode': 'rw'})
             old['Config']['Labels'] = {'com.docker.compose.project': deploy.PROJECT, 'com.docker.compose.service': 'migpt'}
             with patch.multiple(deploy, ROOT=root, RUNTIME=runtime, REGISTRY=registry), \
                     patch.object(deploy, 'inspect_container', return_value=old), \
@@ -210,6 +223,56 @@ class DeploymentTests(unittest.TestCase):
                 deploy.deploy_locked('install', root)
             execute.assert_not_called()
             self.assertEqual(registry.read_text().count(deploy.ENTRY), 1)
+
+    def test_recovery_uses_explicit_old_container_and_does_not_rebuild(self):
+        operations, _, runtime, _ = self.scenario(previous=True, recovery=True)
+        self.assertFalse(any(item[:2] == ['docker', 'build'] for item in operations))
+        self.assertTrue(any(item[:2] == ['docker', 'cp'] and item[2].startswith('migpt-volcano-v3-backup-') for item in operations))
+        mounts = json.loads(runtime.read_text())['services']['migpt']['volumes']
+        self.assertTrue(any(mount['target'] == deploy.DATABASE_TARGET for mount in mounts))
+
+    def test_restore_keeps_history_and_checks_robot_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'snapshot'
+            snapshot.mkdir()
+            index = root / '.bot.json'
+            index.write_text(json.dumps({'botId': 'bot', 'masterId': 'master'}))
+            connection = sqlite3.connect(snapshot / 'app.db')
+            connection.executescript('CREATE TABLE User(id TEXT); INSERT INTO User VALUES ("bot"),("master"); CREATE TABLE Message(text TEXT); INSERT INTO Message VALUES ("history");')
+            connection.close()
+            deploy.restore_database(snapshot, root / 'restored', index)
+            with sqlite3.connect(root / 'restored/app.db') as restored:
+                self.assertEqual(restored.execute('SELECT text FROM Message').fetchone()[0], 'history')
+            restored.close()
+            with self.assertRaisesRegex(deploy.DeployError, '拒绝覆盖'):
+                deploy.restore_database(snapshot, root / 'restored', index)
+            index.write_text(json.dumps({'botId': 'wrong', 'masterId': 'master'}))
+            with self.assertRaisesRegex(deploy.DeployError, '不匹配'):
+                deploy.restore_database(snapshot, root / 'mismatch', index)
+            self.assertTrue((snapshot / 'app.db').exists())
+
+    def test_restore_recovers_committed_wal_before_removing_copied_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            snapshot = root / 'snapshot'
+            snapshot.mkdir()
+            index = root / '.bot.json'
+            index.write_text(json.dumps({'botId': 'bot', 'masterId': 'master'}))
+            connection = sqlite3.connect(snapshot / 'app.db')
+            try:
+                connection.execute('PRAGMA journal_mode=WAL')
+                connection.executescript('CREATE TABLE User(id TEXT); INSERT INTO User VALUES ("bot"),("master");')
+                self.assertTrue((snapshot / 'app.db-wal').exists())
+                deploy.restore_database(snapshot, root / 'restored', index)
+                restored = sqlite3.connect(root / 'restored/app.db')
+                try:
+                    self.assertEqual(restored.execute('SELECT count(*) FROM User').fetchone()[0], 2)
+                finally:
+                    restored.close()
+                self.assertTrue((snapshot / 'app.db-wal').exists())
+            finally:
+                connection.close()
 
 
 if __name__ == '__main__':
