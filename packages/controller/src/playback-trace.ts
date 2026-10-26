@@ -36,7 +36,53 @@ export function tracePlayback(speaker: MiGPT['speaker']) {
         log('调用原生播放', { requestId })
       }
       try {
-        const accepted = await play(options)
+        let accepted: boolean
+        if (
+          options?.url &&
+          !options.tts &&
+          mina.account.device.hardware === 'L05C'
+        ) {
+          // L05C 协议及默认 item_id 来自 MiService.play_by_music_url：
+          // https://github.com/hanxi/MiService/blob/master/miservice/minaservice.py
+          const audioId = '1582971365183456177'
+          log('选择播放协议', {
+            requestId,
+            hardware: 'L05C',
+            method: 'player_play_music',
+          })
+          const result = await mina.ubus('mediaplayer', 'player_play_music', {
+            startaudioid: audioId,
+            music: JSON.stringify({
+              payload: {
+                audio_type: '',
+                audio_items: [
+                  {
+                    item_id: {
+                      audio_id: audioId,
+                      cp: {
+                        album_id: '-1',
+                        episode_index: 0,
+                        id: '355454500',
+                        name: 'xiaowei',
+                      },
+                    },
+                    stream: { url: options.url },
+                  },
+                ],
+                list_params: {
+                  listId: '-1',
+                  loadmore_offset: 0,
+                  origin: 'xiaowei',
+                  type: 'MUSIC',
+                },
+              },
+              play_behavior: 'REPLACE_ALL',
+            }),
+          })
+          accepted = result?.code === 0
+        } else {
+          accepted = await play(options)
+        }
         log('播放接口返回', {
           requestId,
           accepted,
