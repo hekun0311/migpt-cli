@@ -28,6 +28,8 @@ node apps/server/dist/index.js --port 36592 --user YOUR_USER --pwd YOUR_PASSWORD
 
 ## Docker / 1Panel
 
+已有运行中的 `migpt-volcano-v3` 容器时，推荐按 [统一更新菜单接入说明](deploy/1panel/README.md) 做一次迁移。之后执行 `yklx-update` 选择 MiGPT 即可自动构建更新，不必每次手动替换容器。
+
 原仓库 `docker/Dockerfile` 会安装 npm 上的旧版，不包含本次修改。请在仓库根目录构建新的 Dockerfile：
 
 ```sh

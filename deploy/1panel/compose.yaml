@@ -1,0 +1,3 @@
+name: migpt-volcano-v3
+include:
+  - path: /opt/migpt-volcano-v3/runtime/compose.json
