@@ -2,6 +2,17 @@ import { mergeWithUndefined } from './_utils.js'
 import { test, expect, describe } from '@jest/globals'
 
 describe('mergeWithUndefined', () => {
+  test('删除关键词后替换数组，不保留旧的尾部项', () => {
+    expect(
+      mergeWithUndefined(
+        { speaker: { switchSpeakerKeywords: ['把声音换成', '', '', ''] } },
+        { speaker: { switchSpeakerKeywords: ['把声音换成'] } },
+      ),
+    ).toEqual({ speaker: { switchSpeakerKeywords: ['把声音换成'] } })
+    expect(mergeWithUndefined({ keywords: ['旧值'] }, { keywords: [] })).toEqual({
+      keywords: [],
+    })
+  })
   test('单层', () => {
     expect(mergeWithUndefined({ a: 1 }, { a: undefined })).toEqual({
       a: undefined,

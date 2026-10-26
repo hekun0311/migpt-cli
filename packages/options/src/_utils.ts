@@ -17,6 +17,9 @@ export function mergeWithUndefined(dest: unknown, ...src: unknown[]) {
     dest,
     ...src,
     (objValue: unknown, srcValue: unknown, key: string, object: any) => {
+      if (Array.isArray(srcValue)) {
+        return srcValue
+      }
       if (srcValue === undefined) {
         // 不能写成 `return undefined`，这就跟没有返回值一样，会导致 lodash 使用默认合并策略
         object[key] = undefined
