@@ -66,7 +66,47 @@ export function runServer(options?: {
 
   // 小爱音箱会通过这个接口获取语音合成的音频，所以不能给它加 basicAuth
   app.get(ttsPath, (req, res) => {
-    dRoute('进入 GET /tts/tts.mp3，`req.url`：%s', req.url)
+    const requestId = nanoid(8)
+    const startedAt = Date.now()
+    let audioBytes = 0
+    let audioChunks = 0
+    let audioFailed = false
+    const logPlayback = (
+      event: string,
+      details: Record<string, unknown> = {},
+    ) => {
+      process.stdout.write(
+        JSON.stringify({
+          scope: 'TTS播放',
+          requestId,
+          event,
+          elapsedMs: Date.now() - startedAt,
+          ...details,
+        }) + '\n',
+      )
+    }
+    logPlayback('收到请求', {
+      method: req.method,
+      userAgent: req.get('user-agent')?.slice(0, 200),
+      range: req.get('range'),
+    })
+    res.once('finish', () => {
+      logPlayback('响应结束', {
+        status: res.statusCode,
+        audioBytes,
+        audioChunks,
+        audioFailed,
+      })
+    })
+    res.once('close', () => {
+      if (!res.writableFinished) {
+        logPlayback('客户端提前断开', {
+          status: res.headersSent ? res.statusCode : null,
+          audioBytes,
+          audioChunks,
+        })
+      }
+    })
     // req.url 会是这么个格式：`/tts/tts.mp3?speaker=zh-CN-liaoning-XiaobeiNeural+text=要朗读的文本`
     // 其中要注意的是：
     // - speaker 与 text 参数中间用的是加号 + 来连接，而不是 &，所以需要先修正一下
@@ -74,6 +114,7 @@ export function runServer(options?: {
 
     // 没有启动 MiGPT，或者没有配置过 tts
     if (!guiConfigRunning || !guiConfigRunning.tts) {
+      logPlayback('拒绝请求：MiGPT 未启动或未配置 TTS')
       dDefault('没有启动 MiGPT，或者没有配置过 tts，所以返回 500')
       res.status(500).send('Internal Server Error')
       return
@@ -96,7 +137,11 @@ export function runServer(options?: {
       stream: audioStream,
     }
 
-    dAudio('准备合成语音。参数：%O', options)
+    logPlayback('开始合成', {
+      textLength: options.text.length,
+      provider: guiConfigRunning.gui?.ttsProvider,
+      usesDefaultSpeaker: !url.searchParams.get('speaker'),
+    })
 
     tts(options)
       // 错误处理的代码是复制的 `/api/test/audio` 接口里的
@@ -107,6 +152,10 @@ export function runServer(options?: {
         }
       })
       .catch((error: Error) => audioStream.destroy(error))
+
+    res.once('close', () => {
+      if (!res.writableFinished) audioStream.destroy()
+    })
 
     let headersSent = false
 
@@ -126,9 +175,16 @@ export function runServer(options?: {
           'Content-Type': 'audio/mp3',
         })
         headersSent = true
+        logPlayback('开始返回音频', {
+          status: 200,
+          contentType: 'audio/mp3',
+          transferEncoding: 'chunked',
+        })
       }
 
       // 流式响应数据
+      audioBytes += chunk.length
+      audioChunks += 1
       res.write(chunk)
     })
 
@@ -137,6 +193,13 @@ export function runServer(options?: {
     })
 
     audioStream.once('error', (error) => {
+      audioFailed = true
+      logPlayback('音频失败', {
+        errorType: error.name,
+        audioBytes,
+        audioChunks,
+        headersSent,
+      })
       if (!headersSent) {
         res.status(400).send(error.message || 'Internal Server Error')
       } else {
