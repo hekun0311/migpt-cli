@@ -5,6 +5,7 @@
  */
 
 import { MiGPT, type MiGPTConfig } from 'mi-gpt'
+import { tracePlayback } from './playback-trace.js'
 
 let migpt: MiGPT | undefined
 
@@ -20,7 +21,8 @@ process.on('message', (msg: any) => {
   } else if (msg.type === 'run') {
     const config = msg.config as MiGPTConfig
     // console.log('配置：\n', config)
-    const migpt = MiGPT.create(config)
+    migpt = MiGPT.create(config)
+    tracePlayback(migpt.speaker)
     migpt.start()
   }
 })
