@@ -72,6 +72,29 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, '持久挂载'):
             deploy.make_compose(old, 'migpt:test', Path('/source'))
 
+    def test_security_paths_match_actual_engine_defaults_not_a_fixed_list(self):
+        old = container()
+        old['HostConfig']['MaskedPaths'] = ['/proc/kcore', '/server-default']
+        old['HostConfig']['ReadonlyPaths'] = ['/proc/sys']
+        defaults = {'MaskedPaths': ['/server-default', '/proc/kcore'], 'ReadonlyPaths': ['/proc/sys']}
+        model = deploy.make_compose(old, 'migpt:test', Path('/source'), defaults)
+        self.assertNotIn('security_opt', model['services']['migpt'])
+        old['HostConfig']['MaskedPaths'].append('/custom-mask')
+        with self.assertRaisesRegex(deploy.DeployError, '默认安全设置不同'):
+            deploy.make_compose(old, 'migpt:test', Path('/source'), defaults)
+
+    def test_security_probe_never_starts_and_always_cleans_its_own_container(self):
+        result = [{'HostConfig': {'MaskedPaths': ['/proc/kcore'], 'ReadonlyPaths': ['/proc/sys']}}]
+        with patch.object(deploy, 'run', side_effect=['probe-id\n', json.dumps(result), '']) as execute:
+            self.assertEqual(deploy.security_defaults('sha256:old-image')['MaskedPaths'], ['/proc/kcore'])
+        commands = [item.args[0] for item in execute.call_args_list]
+        self.assertEqual(commands[-1], ['docker', 'rm', '-v', 'probe-id'])
+        self.assertFalse(any('start' in command or '--volume' in command for command in commands))
+        with patch.object(deploy, 'run', side_effect=['probe-id\n', deploy.DeployError('inspect failed'), '']) as execute:
+            with self.assertRaises(deploy.DeployError):
+                deploy.security_defaults('sha256:old-image')
+            self.assertEqual(execute.call_args_list[-1].args[0], ['docker', 'rm', '-v', 'probe-id'])
+
     def test_registration_is_idempotent_and_preserves_other_lines(self):
         with tempfile.TemporaryDirectory() as directory:
             registry = Path(directory) / 'projects.conf'
@@ -122,6 +145,7 @@ class DeploymentTests(unittest.TestCase):
 
         with patch.multiple(deploy, ROOT=root, RUNTIME=runtime, REGISTRY=registry), \
                 patch.object(deploy, 'inspect_container', return_value=copy.deepcopy(old)), \
+                patch.object(deploy, 'security_defaults', return_value={'MaskedPaths': [], 'ReadonlyPaths': []}), \
                 patch.object(deploy, 'run', side_effect=fake_run), \
                 patch.object(deploy, 'compose', side_effect=fake_compose), \
                 patch.object(deploy, 'check_ready', side_effect=ready), \

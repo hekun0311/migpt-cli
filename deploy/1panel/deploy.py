@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 
 ROOT = Path('/opt/migpt-volcano-v3')
@@ -74,7 +75,19 @@ def port_from_command(command):
     return port
 
 
-def make_compose(old, image, source):
+def security_defaults(image):
+    # 只创建、不启动探测容器；不挂载现有数据，清理时只删除探测容器及其新匿名卷。
+    name = 'migpt-security-check-' + uuid.uuid4().hex[:12]
+    container_id = run(['docker', 'create', '--name', name, '--network', 'none',
+                        '--entrypoint', 'node', image, '-e', 'process.exit(0)'], capture=True).strip()
+    try:
+        host = json.loads(run(['docker', 'inspect', container_id], capture=True))[0]['HostConfig']
+        return {key: host.get(key) or [] for key in ('MaskedPaths', 'ReadonlyPaths')}
+    finally:
+        run(['docker', 'rm', '-v', container_id], capture=True)
+
+
+def make_compose(old, image, source, engine_security=None):
     config, host = old['Config'], old['HostConfig']
     if config.get('User') not in ('', None, 'root', '0', '0:0'):
         raise DeployError('当前工具只迁移 root 运行的 MiGPT，请先核对容器运行用户。')
@@ -94,13 +107,13 @@ def make_compose(old, image, source):
     }
     defaults = {
         'ConsoleSize': [0, 0], 'MemorySwappiness': -1, 'CpuCount': 0,
-        'MaskedPaths': ['/proc/asound', '/proc/acpi', '/proc/interrupts', '/proc/kcore',
-                        '/proc/keys', '/proc/latency_stats', '/proc/timer_list',
-                        '/proc/timer_stats', '/proc/sched_debug', '/proc/scsi', '/sys/firmware', '/sys/devices/virtual/powercap'],
-        'ReadonlyPaths': ['/proc/bus', '/proc/fs', '/proc/irq', '/proc/sys', '/proc/sysrq-trigger'],
     }
     for key, value in host.items():
         if key not in supported and value not in (None, False, 0, '', [], {}):
+            if key in ('MaskedPaths', 'ReadonlyPaths'):
+                if engine_security is not None and sorted(value) == sorted(engine_security[key]):
+                    continue
+                raise DeployError(f'HostConfig.{key} 与当前 Docker 默认安全设置不同，停止迁移；旧容器未作改动。')
             if key not in defaults or value != defaults[key]:
                 raise DeployError(f'无法准确迁移 HostConfig.{key}，旧容器未作改动。')
     if config.get('Shell') or config.get('OnBuild'):
@@ -363,7 +376,7 @@ def deploy_locked(action, source):
 
     revision = run(['git', '-C', str(source), 'rev-parse', '--short=12', 'HEAD'], capture=True).strip()
     image = f'migpt-volcano-v3:git-{revision}'
-    candidate = make_compose(old, image, source)
+    candidate = make_compose(old, image, source, security_defaults(old['Image']))
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     backup = ROOT / 'backups' / f'{stamp}-{revision}'
     backup.mkdir(parents=True, mode=0o700)
