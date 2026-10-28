@@ -109,7 +109,7 @@ export function runServer(options?: {
     })
     // req.url 会是这么个格式：`/tts/tts.mp3?speaker=zh-CN-liaoning-XiaobeiNeural+text=要朗读的文本`
     // 其中要注意的是：
-    // - speaker 与 text 参数中间用的是加号 + 来连接，而不是 &，所以需要先修正一下
+    // - 音箱可能把参数分隔符改成 + 或空格（编码为 %20），需要先修正
     // - speaker 参数一般是空的，但是，如果用户通过【切换音色关键词】换过音色，那么这个参数就会有值，例如 zh-CN-liaoning-XiaobeiNeural
 
     // 没有启动 MiGPT，或者没有配置过 tts
@@ -125,7 +125,7 @@ export function runServer(options?: {
       guiConfigRunning.gui?.ttsProvider,
     )
 
-    const nUrl = req.url.replace('+text=', '&text=') // 修正请求 URL
+    const nUrl = req.url.replace(/(\?speaker=[^&]*?)(?:\+|%20| )text=/, '$1&text=')
     const url = new URL('http://localhost' + nUrl)
     logPlayback('参数解析', {
       queryLength: url.search.length,
