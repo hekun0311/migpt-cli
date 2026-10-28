@@ -6,6 +6,7 @@
 
 import { MiGPT, type MiGPTConfig } from 'mi-gpt'
 import { tracePlayback } from './playback-trace.js'
+import { installL05CTakeover } from './l05c-takeover.js'
 
 let migpt: MiGPT | undefined
 
@@ -23,6 +24,7 @@ process.on('message', (msg: any) => {
     // console.log('配置：\n', config)
     migpt = MiGPT.create(config)
     tracePlayback(migpt.speaker)
+    installL05CTakeover(migpt.speaker)
     migpt.start()
   }
 })

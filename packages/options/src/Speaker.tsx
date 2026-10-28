@@ -229,7 +229,13 @@ export function Speaker(props: {
             如何调用 AI 进行回答？
           </a>
         </p>
-        <FormGroup label={'调用 AI 关键词'} inline>
+        <FormGroup
+          label={'AI 对话触发前缀'}
+          helperText={
+            '此配置不修改音箱唤醒词。请先唤醒小爱，再说以触发前缀开头的问题。例如：“小爱同学” → “派蒙同学，今天星期几？”（需配置“派蒙同学”前缀）。'
+          }
+          inline
+        >
           <MultiInput
             value={config.config.speaker.callAIKeywords}
             onChange={(value) => {
@@ -245,6 +251,9 @@ export function Speaker(props: {
 
       <Card>
         <H5>连续对话（唤醒模式）</H5>
+        <p className={Classes.TEXT_MUTED + ' ' + Classes.TEXT_SMALL}>
+          以下进入、退出关键词仅控制 MiGPT 会话，不能从待机状态唤醒音箱；仍需先使用设备唤醒词。
+        </p>
         <p className={Classes.TEXT_MUTED + ' ' + Classes.TEXT_SMALL}>
           “连续对话”的说明见：
           <a href="https://migptgui.com/docs/faqs/wakeup" target={'_blank'}>

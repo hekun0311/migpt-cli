@@ -16,7 +16,7 @@
     "build:docker-server-version": "docker tag lmk123/migpt-server lmk123/migpt-server:$(node -p \"require('./apps/server/package.json').version\")",
     "pub-cli": "npx nx run migpt-cli:build --verbose && npm publish --access public -w apps/cli",
     "build:volcano": "npm run build -w packages/options && npm run build -w packages/controller && npm run build -w packages/server && npm run build -w packages/gui && npm run build -w apps/server",
-    "test:volcano": "node --test tests/volcano-v3.test.mjs"
+    "test:volcano": "node --test tests/volcano-v3.test.mjs tests/playback-trace.test.mjs tests/l05c-takeover.test.mjs tests/trigger-prefix.test.mjs"
   },
   "private": true,
   "devDependencies": {
