@@ -127,6 +127,16 @@ export function runServer(options?: {
 
     const nUrl = req.url.replace('+text=', '&text=') // 修正请求 URL
     const url = new URL('http://localhost' + nUrl)
+    logPlayback('参数解析', {
+      queryLength: url.search.length,
+      hasText: url.searchParams.has('text'),
+      hasSpeaker: url.searchParams.has('speaker'),
+      speakerLength: url.searchParams.get('speaker')?.length || 0,
+      htmlTextSeparator: /&amp;text=/i.test(req.url),
+      encodedTextSeparator: /%26(?:amp%3B)?text(?:=|%3D)/i.test(req.url),
+      plusTextSeparator: /\+text=/.test(req.url),
+      spaceTextSeparator: /(?: |%20)text=/.test(req.url),
+    })
     const audioStream = new Readable({ read() {} })
 
     const options = {
