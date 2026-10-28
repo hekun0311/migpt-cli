@@ -112,7 +112,8 @@ test('L05C URL playback uses the documented music envelope', async () => {
           assert.fail('must not use player_play_url for L05C')
         },
         async ubus(...args) {
-          request = args
+          if (args[1] === 'player_play_music') request = args
+          else assert.deepEqual(args, ['mediaplayer', 'player_set_loop', { type: 2, media: 'common' }])
           return { code: 0 }
         },
       }
@@ -134,6 +135,8 @@ test('L05C URL playback uses the documented music envelope', async () => {
   assert.equal(music.play_behavior, 'REPLACE_ALL')
   assert.equal(music.payload.audio_type, '')
   assert.equal(output[1].method, 'player_play_music')
+  assert.equal(output[2].event, '设置非循环播放')
+  assert.equal(output[2].accepted, true)
   assert.doesNotMatch(JSON.stringify(output), /secret|private-text/)
 })
 
@@ -186,4 +189,28 @@ test('L05C native speech still uses the existing method', async () => {
     assert.equal(await speaker.MiNA.play(options), true)
   })
   assert.equal(actual, options)
+})
+
+test('L05C reports failure when disabling repeat is rejected', async () => {
+  const methods = []
+  const speaker = {
+    async unWakeUp() {},
+    async initMiServices() {
+      this.MiNA = {
+        account: { device: { hardware: 'L05C' } },
+        async play() { assert.fail('no protocol fallback') },
+        async ubus(path, method) {
+          methods.push(method)
+          return { code: method === 'player_set_loop' ? 1 : 0 }
+        },
+      }
+    },
+  }
+  const output = await capture(async () => {
+    tracePlayback(speaker)
+    await speaker.initMiServices()
+    assert.equal(await speaker.MiNA.play({ url: 'http://example.com/audio.mp3' }), false)
+  })
+  assert.deepEqual(methods, ['player_play_music', 'player_set_loop'])
+  assert.equal(output.find(item => item.event === '设置非循环播放').accepted, false)
 })

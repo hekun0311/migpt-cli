@@ -80,6 +80,15 @@ export function tracePlayback(speaker: MiGPT['speaker']) {
             }),
           })
           accepted = result?.code === 0
+          if (accepted) {
+            // 与 hass-xiaomi-miot 的 TTS announce 一致，避免单条语音循环。
+            const loop = await mina.ubus('mediaplayer', 'player_set_loop', {
+              type: 2,
+              media: 'common',
+            })
+            accepted = loop?.code === 0
+            log('设置非循环播放', { requestId, accepted })
+          }
         } else {
           accepted = await play(options)
         }
